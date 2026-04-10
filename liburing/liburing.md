@@ -2,7 +2,7 @@
   块设备，以Nvme SSD为例，该类型块设备拥有多个处理队列，系统初始化时，内核会在block layer为其处理队列创建对应的blk_mq_hw_ctx，每个blk_mq_hw_ctx会与某个CPU所绑定。对于block layer如何处理request会有多个因素影响，当块设备挂载了IO Scheduler（cat /sys/block/<device>/queue/scheduler）或者block layer层配置了开启合并request的配置（cat /sys/block/<device>/queue/nomerges）时，request不会立马尝试提交到blk_mq_hw_ctx。当上述两种情况都不存在时，block layer会立马尝试将request提交到blk_mq_hw_ctx，如果此时该blk_mq_hw_ctx已满，request会被保存到一个临时队列，在之后的某个时机再尝试提交到blk_mq_hw_ctx。  
   原文：“When the request arrives at the block layer, it will try the shortest path possible: send it directly to the hardware queue. However, there are two cases that it might not do that: if there’s an IO scheduler attached at the layer or if we want to try to merge requests. In both cases, requests will be sent to the software queue.”  
   block layer内核文档：https://www.kernel.org/doc/html/latest/block/blk-mq.html  
-  对于写文件，大多数时候write都是将user的内存数据memcpy到page cache就返回了，不会阻塞user thread，之后触发脏页刷盘的时候，由write back内核线程调用block layer的接口创建bio->构建request。  
+  对于写文件，大多数时候write都是将user的内存数据memcpy到page cache就返回了，不会阻塞user thread，之后触发脏页刷盘的时候，由write back内核线程调用vfs的接口创建bio提交到block layer，如果块设备未挂载IO Schedule那么立即构建request，否则尝会尝试合并bio。  
   对于读文件，如果缓存在page cache，则memecpy到user memory直接返回。如果cache miss，则调用block layer的接口创建request（此时还是在user thread）。之后的步骤则是上面所述。  
   linux会根据不同会话创建对应的cgroup，在这期间创建的进程都属于这个cgroup。如果cgroup开启了io控制器，一般是不会开，那么带宽、iops都受这个io控制器的限制。同时脏页刷盘比例也是由各个cgroup控制，但是刷盘时不一定只刷该cgroup的脏页（可以开启per-cgroup，但也不一定保证只刷该cgroup的脏页）。
 
@@ -320,10 +320,10 @@ enum io_uring_op {
 
 + IOSQE_ASYNC  
   有些IO操作可能直接在SQPOLL线程里执行，这个flag可以避免IO操作直接在SQPOLL线程里执行。  
-  1、普通write,使用page cache，user调用write大部分是将数据拷贝到page cache就返回，不阻塞user thread,page cache脏页刷盘时，write back内核线程调用block layer的接口创建并提交bio，当提交bio后就返回，不会再阻塞write back内核线程。  
-  2、普通write+O_DIRECT,在user thread调用block layer的接口创建提交bio，当DMA数据到块设备后，触发中断通知CPU，CPU唤醒挂起的线程，write才会返回，此时user thread才不阻塞。  
-  3、liburing+O_DIRECT，在io-wq线程中调用block layer的接口创建提交bio，当DMA数据到块设备后，触发中断通知CPU，CPU唤醒挂起的线程，在回调函数中创建CQ放入队列，write返回，此时io-wq线程才不阻塞。  
-  4、liburing+O_DIRECT+IOSQE_ASYNC,在io-wq线程中调用block layer的接口创建提交bio，提交bio后，io-wq thread就不再阻塞，当DMA数据到块设备后，触发中断通知CPU，CPU唤醒挂起的线程，在回调函数中创建CQ放入队列。
+  1、普通write,使用page cache，user调用write大部分是将数据拷贝到page cache就返回，不阻塞user thread,page cache脏页刷盘时，write back内核线程调用vfs的接口创建并提交bio到block layer，当提交bio后就返回，不会再阻塞write back内核线程。  
+  2、普通write+O_DIRECT,在user thread调用vfs的接口创建提交bio到block layer，当DMA数据到块设备后，触发中断通知CPU，CPU唤醒挂起的线程，write才会返回，此时user thread才不阻塞。  
+  3、liburing+O_DIRECT，在io-wq线程中调用vfs的接口创建提交bio到block layer，当DMA数据到块设备后，触发中断通知CPU，CPU唤醒挂起的线程，在回调函数中创建CQ放入队列，write返回，此时io-wq线程才不阻塞。  
+  4、liburing+O_DIRECT+IOSQE_ASYNC,在io-wq线程中调用vfs的接口创建提交bio到block layer，提交bio后，io-wq thread就不再阻塞，当DMA数据到块设备后，触发中断通知CPU，CPU唤醒挂起的线程，在回调函数中创建CQ放入队列。
 
 + IOSQE_BUFFER_SELECT  
   指定group中选择合适的register buffer。
